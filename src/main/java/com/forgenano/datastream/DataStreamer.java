@@ -4,32 +4,90 @@ import com.forgenano.datastream.arbin.ArbinDbStreamer;
 import com.forgenano.datastream.arbin.ArbinEventFirehoseConsumer;
 import com.forgenano.datastream.aws.ArbinDataFirehoseClient;
 import com.forgenano.datastream.config.Configuration;
+import com.forgenano.datastream.filter.StreamableFileFilter;
 import com.forgenano.datastream.listeners.DataDirectoryEventListener;
+import com.forgenano.datastream.model.StreamDataFileRunnable;
 import com.forgenano.datastream.watcher.DataDirectoryWatcher;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 
 import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.*;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Created by michael on 4/7/17.
  */
-public class DataStreamer {
+public class DataStreamer implements DataDirectoryEventListener {
 
     private static Logger log = LoggerFactory.getLogger(DataStreamer.class);
 
     public static Configuration configuration;
+
+    public static DataStreamer instance;
+
+    private ArbinDataFirehoseClient firehoseClient;
+    private ArbinEventFirehoseConsumer firehoseArbinEventConsumer;
+    private Map<Path, ArbinDbStreamer> dbStreamers;
+    private ExecutorService listenerTaskExecutor;
+
+    private DataStreamer(Configuration configuration) {
+        this.dbStreamers = Maps.newHashMap();
+        this.firehoseClient = ArbinDataFirehoseClient.BuildKinesisFirehoseClient(
+                        configuration.getAwsRegionName(), configuration.getFirehoseStreamName());
+
+        this.firehoseArbinEventConsumer = new ArbinEventFirehoseConsumer(this.firehoseClient);
+
+        this.listenerTaskExecutor = Executors.newSingleThreadExecutor();
+    }
+
+    @Override
+    public void handleDataFileEvent(Path dataFilePath, WatchEvent.Kind<Path> eventKind) {
+        if (eventKind == StandardWatchEventKinds.ENTRY_CREATE) {
+
+            if (!StreamableFileFilter.IsFileStreamable(dataFilePath)) {
+                return;
+            }
+
+            log.info("New data file to stream: " + dataFilePath.toAbsolutePath().toString());
+
+            this.listenerTaskExecutor.submit(new StreamDataFileRunnable(this, dataFilePath));
+        }
+        else if (eventKind == StandardWatchEventKinds.ENTRY_MODIFY) {
+            log.info("Data file was modified: " + dataFilePath.toAbsolutePath().toString());
+
+            if (this.dbStreamers.containsKey(dataFilePath.toAbsolutePath())) {
+                ArbinDbStreamer dbStreamer = this.dbStreamers.get(dataFilePath.toAbsolutePath());
+
+                log.info("Notifying arbin db streamer of data file modification.");
+                dbStreamer.dataFileWasModified();
+            }
+        }
+    }
+
+    public void startStreamingDataFromNewDataFile(Path newDataFile) {
+        ArbinDbStreamer dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(newDataFile);
+
+        this.dbStreamers.put(newDataFile.toAbsolutePath(), dbStreamer);
+
+        dbStreamer.addConsumer(this.firehoseArbinEventConsumer);
+
+        dbStreamer.startLiveMonitoring();
+    }
 
     public static void main(String[] args) {
 
         OptionSet runOptions = parseRunArgs(args);
 
         DataStreamer.configuration = setupConfiguration(runOptions);
+
+        instance = new DataStreamer(configuration);
 
         if (runOptions.has("f") && runOptions.hasArgument("f") && !runOptions.has("d")) {
             Path dataFilePath = Paths.get((String) runOptions.valueOf("f"));
@@ -46,14 +104,11 @@ public class DataStreamer {
 
             DataDirectoryWatcher directoryWatcher = DataDirectoryWatcher.InitializeSingleton(watchPath);
 
-            directoryWatcher.addDirectoryEventListener(new DataDirectoryEventListener() {
-                @Override
-                public void newFileInDataDirectory(Path newDataFilePath) {
-                    log.info("Here is a new data file: " + newDataFilePath.toAbsolutePath().toString());
-                }
-            });
+            directoryWatcher.addDirectoryEventListener(DataStreamer.instance);
 
             directoryWatcher.start();
+
+            directoryWatcher.waitForShutdown();
         }
 
         log.info("Finished Running Data Streamer.");
@@ -82,12 +137,9 @@ public class DataStreamer {
         if (!dumpMetadataOnly) {
             log.info("Consuming arbin data file: " + arbinFilePath.toAbsolutePath().toString());
 
-            ArbinDataFirehoseClient arbinDataFirehoseClient =
-                    ArbinDataFirehoseClient.BuildKinesisFirehoseClient(
-                            configuration.getAwsRegionName(), configuration.getFirehoseStreamName());
 
-            ArbinEventFirehoseConsumer firehoseConsumer = new ArbinEventFirehoseConsumer(arbinDataFirehoseClient);
-            dbStreamer.addConsumer(firehoseConsumer);
+
+            dbStreamer.addConsumer(DataStreamer.instance.firehoseArbinEventConsumer);
             dbStreamer.blockAndStreamFinishedArbinDatabase();
         }
         else {

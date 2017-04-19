@@ -88,6 +88,21 @@ public class DataDirectoryWatcher {
         this.fsEventMonitorService.shutdown();
     }
 
+    public void waitForShutdown() {
+        if (this.fsEventMonitorService.isShutdown())
+            return;
+        else {
+            while(true) {
+                try {
+                    this.fsEventMonitorService.awaitTermination(2, TimeUnit.SECONDS);
+                }
+                catch(Exception e) {
+                    log.warn("Caught exception while waiting for fs event monitor to shutdown.", e);
+                }
+            }
+        }
+    }
+
     public void addDirectoryEventListener(DataDirectoryEventListener listener) {
         if (!this.eventListeners.contains(listener)) {
             this.eventListeners.add(listener);
@@ -99,7 +114,8 @@ public class DataDirectoryWatcher {
 
         try {
             this.watchingDirectoryKey =
-                    this.directoryToWatch.register(this.watchService, StandardWatchEventKinds.ENTRY_CREATE);
+                    this.directoryToWatch.register(this.watchService, StandardWatchEventKinds.ENTRY_CREATE,
+                            StandardWatchEventKinds.ENTRY_MODIFY);
         }
         catch(Exception e) {
             log.error("Couldn't register the data directory to be watched.");
@@ -123,28 +139,34 @@ public class DataDirectoryWatcher {
                                     this.directoryToWatch.toAbsolutePath().toString());
                         }
                         else if (dirEvent.context() instanceof Path) {
-                            Path newFilePath = this.directoryToWatch.resolve((Path) dirEvent.context());
+                            WatchEvent.Kind<Path> pathEventKind = (WatchEvent.Kind<Path>) eventKind;
+                            Path dataFilePath = this.directoryToWatch.resolve((Path) dirEvent.context());
 
-                            if (!Files.isDirectory(newFilePath) && !Files.isRegularFile(newFilePath)) {
-                                log.info("New file found in data directory: " + newFilePath.toAbsolutePath().toString());
+                            if (eventKind == StandardWatchEventKinds.ENTRY_CREATE) {
+                                if (!Files.isDirectory(dataFilePath) && Files.isRegularFile(dataFilePath)) {
+                                    log.info("New file found in data directory: " + dataFilePath.toAbsolutePath().toString());
 
-                                notifyListenersOfNewFile(newFilePath);
-                            }
-                            else if (Files.isDirectory(newFilePath)) {
-                                log.info("New directory found in data directory: " +
-                                        newFilePath.toAbsolutePath().toString() + " registering for events.");
+                                    notifyListenersOfNewFile(dataFilePath, pathEventKind);
+                                } else if (Files.isDirectory(dataFilePath)) {
+                                    log.info("New directory found in data directory: " +
+                                            dataFilePath.toAbsolutePath().toString() + " registering for events.");
 
-                                try {
-                                    newFilePath.register(this.watchService, StandardWatchEventKinds.ENTRY_CREATE);
+                                    try {
+                                        dataFilePath.register(this.watchService, StandardWatchEventKinds.ENTRY_CREATE,
+                                                StandardWatchEventKinds.ENTRY_MODIFY);
+                                    } catch (Exception e) {
+                                        log.error("Failed to register for events on the child directory: " +
+                                                dataFilePath.toAbsolutePath().toString());
+                                    }
+                                } else {
+                                    log.warn("Ignoring new unknown file type in data directory: " +
+                                            dataFilePath.toAbsolutePath().toString());
                                 }
-                                catch(Exception e) {
-                                    log.error("Failed to register for events on the child directory: " +
-                                            newFilePath.toAbsolutePath().toString());
-                                }
                             }
-                            else {
-                                log.warn("Ignoring new unknown file type in data directory: " +
-                                        newFilePath.toAbsolutePath().toString());
+                            else if (eventKind == StandardWatchEventKinds.ENTRY_MODIFY) {
+                                log.info("File was modified: " + dataFilePath.toAbsolutePath().toString());
+
+                                notifyListenersOfNewFile(dataFilePath, pathEventKind);
                             }
                         } else {
                             log.warn("Unknown context object for directory watcher event: " + dirEvent.toString());
@@ -169,9 +191,9 @@ public class DataDirectoryWatcher {
         log.info("Stopped watching data directory for changes.");
     };
 
-    private void notifyListenersOfNewFile(Path newFile) {
+    private void notifyListenersOfNewFile(Path newFile, WatchEvent.Kind<Path> eventKind) {
         this.eventListeners.forEach((listener) -> {
-            listener.newFileInDataDirectory(newFile);
+            listener.handleDataFileEvent(newFile, eventKind);
         });
     }
 }

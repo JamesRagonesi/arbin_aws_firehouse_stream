@@ -19,11 +19,11 @@ public class ArbinEvent {
         StringBuffer id = new StringBuffer();
 
         id.append(testName);
-        id.append("_");
+        id.append("_tid_");
         id.append(testId);
-        id.append("_");
+        id.append("_dp_");
         id.append(dataPoint);
-        id.append("_");
+        id.append("_ci_");
         id.append(channelIndex);
 
         return id.toString();
@@ -64,10 +64,10 @@ public class ArbinEvent {
                       double chargeCapacity, double dischargeCapacity, double dV_dt, double internalResistance,
                       double acImpedance, double aciPhaseAngle, String scheduleFileName) {
 
-        this.compositeId = BuildCompositeId(testName, testId, dataPoint, channelIndex);
         this.testId = testId;
         this.testName = parseTestNameFromChannelTestName(channelTestName);
         this.channelTestName = channelTestName;
+        this.compositeId = BuildCompositeId(testName, testId, dataPoint, channelIndex);
         this.scheduleFileName = scheduleFileName;
         this.dataPoint = dataPoint;
         this.channelIndex = channelIndex;
@@ -121,5 +121,9 @@ public class ArbinEvent {
 
     public String getTestName() {
         return testName;
+    }
+
+    public long getDataPoint() {
+        return this.dataPoint;
     }
 }

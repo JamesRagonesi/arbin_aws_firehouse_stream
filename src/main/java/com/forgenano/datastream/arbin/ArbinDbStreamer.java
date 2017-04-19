@@ -18,6 +18,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Created by michael on 4/7/17.
@@ -71,10 +73,10 @@ public class ArbinDbStreamer {
                     "g.Test_Name, g.Channel_Index, g.DAQ_Index, g.Channel_Type, g.Creator, g.Schedule_File_Name " +
              "FROM Channel_Normal_Table as c " +
              "LEFT JOIN Global_Table as g on c.Test_ID = g.Test_ID " +
-             "WHERE Data_Point BETWEEN ? and ?;";
+             "ORDER BY c.Data_Point ASC, TEST_ID LIMIT ? OFFSET ?";
 
     private static final String CHANNEL_TEST_COUNT_QUERY =
-            "SELECT count(c.Data_Point) FROM Channel_Normal_Table as c;";
+            "SELECT count(c.Data_Point) FROM Channel_Normal_Table as c where c.Data_point > ?;";
 
     private ExecutorService eventNotifierService;
     private ExecutorService eventMonitorService;
@@ -85,6 +87,8 @@ public class ArbinDbStreamer {
     private PreparedStatement channelTestEntryStatement;
     private PreparedStatement channelTestCountStatement;
     private int resultPageSize;
+    private ReentrantLock dataFileLock;
+    private Condition dataFileModifiedCondition;
 
     private Runnable eventNotifierRunnable = () -> {
         while(!this.shutdownSignal.get()) {
@@ -102,12 +106,26 @@ public class ArbinDbStreamer {
     };
 
     private Runnable eventMonitorRunnable = () -> {
+        long lastDataPoint = 0;
+
         while(!this.shutdownSignal.get()) {
             try {
+                long numberOfRecordsToConsume = getNumberOfDataEventsAvailable(lastDataPoint);
 
+                if (numberOfRecordsToConsume > 0){
+                    lastDataPoint = consumeAvailableArbinData(numberOfRecordsToConsume);
+                }
+                else {
+                    this.dataFileLock.lock();
+
+                    this.dataFileModifiedCondition.await(30, TimeUnit.SECONDS);
+                }
             }
             catch(Exception e) {
                 log.error("An exception occurred while monitoring for new arbin events: ", e);
+            }
+            finally {
+                this.dataFileLock.unlock();
             }
         }
     };
@@ -120,6 +138,8 @@ public class ArbinDbStreamer {
         this.newEventQueue = Queues.newSynchronousQueue();
         this.shutdownSignal = new AtomicBoolean(false);
         this.resultPageSize = resultPageSize;
+        this.dataFileLock = new ReentrantLock();
+        this.dataFileModifiedCondition = this.dataFileLock.newCondition();
 
         this.eventNotifierService.submit(this.eventNotifierRunnable);
 
@@ -154,9 +174,29 @@ public class ArbinDbStreamer {
     }
 
     public void blockAndStreamFinishedArbinDatabase() {
+        consumeAvailableArbinData(getNumberOfDataEventsAvailable(0));
+    }
+
+    public void dataFileWasModified() {
+        try {
+            this.dataFileLock.lock();
+
+            this.dataFileModifiedCondition.signalAll();
+        }
+        catch (Exception e) {
+            log.warn("Caught an exception while notifying the data file monitor: ", e);
+        }
+        finally {
+            this.dataFileLock.unlock();
+        }
+    }
+
+    private long getNumberOfDataEventsAvailable(long sinceLastDataPoint) {
         long numberOfRecordsToConsume = 0;
 
         try {
+            this.channelTestCountStatement.setLong(1, sinceLastDataPoint);
+
             ResultSet countResult = this.channelTestCountStatement.executeQuery();
 
             if (countResult.next()) {
@@ -171,7 +211,7 @@ public class ArbinDbStreamer {
             throw new IllegalStateException("Don't know the number of arbin data events.", e);
         }
 
-        consumeAvailableArbinData(numberOfRecordsToConsume);
+        return numberOfRecordsToConsume;
     }
 
     private synchronized void notifyEventConsumers(ArbinEvent event) {
@@ -180,16 +220,15 @@ public class ArbinDbStreamer {
         });
     }
 
-    private void consumeAvailableArbinData(long numberOfRecordsToConsume) {
-        int lowerBound = 0;
-        int upperBound = this.resultPageSize;
+    private long consumeAvailableArbinData(long numberOfRecordsToConsume) {
+        long offset = 0;
 
         log.info("Consuming " + numberOfRecordsToConsume + " of arbin channel data.");
 
-        while(upperBound <= numberOfRecordsToConsume) {
+        while(offset <= numberOfRecordsToConsume) {
             try {
-                this.channelTestEntryStatement.setInt(1, lowerBound);
-                this.channelTestEntryStatement.setInt(2, upperBound);
+                this.channelTestEntryStatement.setInt(1, this.resultPageSize);
+                this.channelTestEntryStatement.setLong(2, offset);
             }
             catch(Exception e) {
                 log.error("Failed to setup the channel test entry query with bounds. Because: ", e);
@@ -203,17 +242,17 @@ public class ArbinDbStreamer {
                     ArbinEvent arbinEvent = convertArbinFromChannelTestEntryResultSet(channelQueryResultSet);
 
                     this.newEventQueue.put(arbinEvent);
+                    offset++;
                 }
-
-                lowerBound = upperBound + 1;
-                upperBound+= this.resultPageSize;
             }
             catch(Exception e) {
-                log.error("Failed to execute channel test entry query with bounds: " + lowerBound + " - " + upperBound +
-                          " because: ", e);
+                log.error("Failed to execute channel test entry query with offset: " + offset + " - limit:" +
+                        this.resultPageSize + " because: ", e);
                 break;
             }
         }
+
+        return offset;
     }
 
     private ArbinEvent convertArbinFromChannelTestEntryResultSet(ResultSet resultSetRow) {
@@ -322,4 +361,6 @@ public class ArbinDbStreamer {
             log.error("Failed to get the tables for the db because: " + e.getMessage());
         }
     }
+
+
 }

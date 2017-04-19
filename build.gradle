@@ -1,0 +1,44 @@
+buildscript {
+    repositories {
+        maven {
+            url "https://plugins.gradle.org/m2/"
+        }
+    }
+    dependencies {
+        classpath "gradle.plugin.edu.sc.seis.gradle:launch4j:2.3.0"
+    }
+}
+
+apply plugin: "edu.sc.seis.launch4j"
+
+group 'com.forgenano'
+version '0.0.1-SNAPSHOT'
+
+apply plugin: 'java'
+
+sourceCompatibility = 1.8
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testCompile group: 'junit', name: 'junit', version: '4.12'
+    compile group: 'org.slf4j', name: 'slf4j-log4j12', version: '1.7.25'
+    compile group: 'net.sf.ucanaccess', name: 'ucanaccess', version: '4.0.1'
+    compile group: 'com.amazonaws', name: 'aws-java-sdk', version: '1.11.115'
+    compile group: 'com.google.guava', name: 'guava', version: '19.0'
+    compile 'com.google.code.gson:gson:2.8.0'
+    compile 'joda-time:joda-time:2.9.9'
+    compile group: 'net.sf.jopt-simple', name: 'jopt-simple', version: '5.0.3'
+
+}
+
+
+launch4j {
+    outfile = 'DataStream.xex'
+    mainClassName = 'com.forgenano.datastream.DataStreamer'
+    //copyConfigurable = project.tasks.shadowJar.outputs.files
+    //jar = "lib/${project.tasks.shadowJar.archiveName}"
+    icon = 'icons/myApp.ico'
+}

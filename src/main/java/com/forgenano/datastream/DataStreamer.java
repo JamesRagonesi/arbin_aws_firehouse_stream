@@ -148,7 +148,6 @@ public class DataStreamer implements DataDirectoryEventListener {
             dbStreamer.dumpArbinDbDetails();
         }
 
-
         dbStreamer.shutdown();
     }
 

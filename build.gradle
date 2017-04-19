@@ -1,7 +1,8 @@
 buildscript {
     repositories {
+        jcenter()
         maven {
-            url "https://plugins.gradle.org/m2/"
+          url "https://plugins.gradle.org/m2/"
         }
     }
     dependencies {
@@ -9,17 +10,17 @@ buildscript {
     }
 }
 
-apply plugin: "edu.sc.seis.launch4j"
-
 group 'com.forgenano'
 version '0.0.1-SNAPSHOT'
 
 apply plugin: 'java'
+apply plugin: "edu.sc.seis.launch4j"
 
 sourceCompatibility = 1.8
 
 repositories {
     mavenCentral()
+    jcenter()
 }
 
 dependencies {
@@ -31,14 +32,13 @@ dependencies {
     compile 'com.google.code.gson:gson:2.8.0'
     compile 'joda-time:joda-time:2.9.9'
     compile group: 'net.sf.jopt-simple', name: 'jopt-simple', version: '5.0.3'
-
 }
 
 
 launch4j {
-    outfile = 'DataStream.xex'
+    outfile = 'DataStream.exe'
     mainClassName = 'com.forgenano.datastream.DataStreamer'
     //copyConfigurable = project.tasks.shadowJar.outputs.files
     //jar = "lib/${project.tasks.shadowJar.archiveName}"
-    icon = 'icons/myApp.ico'
+    icon = "${project.projectDir}/src/main/resources/icons/32x32.png"
 }

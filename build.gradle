@@ -40,5 +40,14 @@ launch4j {
     mainClassName = 'com.forgenano.datastream.DataStreamer'
     //copyConfigurable = project.tasks.shadowJar.outputs.files
     //jar = "lib/${project.tasks.shadowJar.archiveName}"
-    icon = "${project.projectDir}/src/main/resources/icons/32x32.png"
+    icon = "${project.projectDir}/src/main/resources/icons/48x48.ico"
+}
+
+jar {
+  manifest {
+    attributes(
+      //'Class-Path': configurations.compile.collect { it.getName() }.join(' '),
+      'Main-Class': 'com.forgenano.datastreamer.DataStreamer'
+    )
+  }
 }

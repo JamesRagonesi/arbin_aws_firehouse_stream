@@ -10,4 +10,5 @@ public class ConfigModel {
     public String awsRegionName;
     public String firehoseStreamName;
     public String directoryToWatch;
+    public String logFile;
 }

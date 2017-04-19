@@ -10,10 +10,14 @@ import com.forgenano.datastream.model.StreamDataFileRunnable;
 import com.forgenano.datastream.watcher.DataDirectoryWatcher;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import org.apache.log4j.FileAppender;
+import org.apache.log4j.PatternLayout;
+import org.apache.log4j.Priority;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
+import org.slf4j.event.Level;
 
 import java.io.InputStream;
 import java.nio.file.*;
@@ -82,10 +86,29 @@ public class DataStreamer implements DataDirectoryEventListener {
     }
 
     public static void main(String[] args) {
+        System.out.println("DataStreamer Starting...");
 
         OptionSet runOptions = parseRunArgs(args);
 
         DataStreamer.configuration = setupConfiguration(runOptions);
+
+        System.out.println("Attempting to use log location: " + DataStreamer.configuration.getLogFileString());
+        try {
+            Path logFilePath = Paths.get(DataStreamer.configuration.getLogFileString());
+            FileAppender fileAppender = new FileAppender(
+                    new PatternLayout("%d %-5p [%c{1}] %m%n"), logFilePath.toAbsolutePath().toString(), true);
+
+            fileAppender.setThreshold(org.apache.log4j.Level.ALL);
+            org.apache.log4j.Logger.getRootLogger().addAppender(fileAppender);
+        }
+        catch(Exception e) {
+            System.out.println("Failed to setup the log file at: " + DataStreamer.configuration.getLogFileString() +
+                    " becuase: " + e.getMessage());
+            log.error("Failed to setup the log file at: " + DataStreamer.configuration.getLogFileString() +
+                    " becuase: " + e.getMessage(), e);
+
+            System.exit(1);
+        }
 
         instance = new DataStreamer(configuration);
 

@@ -56,4 +56,8 @@ public class Configuration {
     public String getDirectoryToWatch() {
         return this.model.directoryToWatch;
     }
+
+    public String getLogFileString() {
+        return this.model.logFile;
+    }
 }

@@ -1,5 +1,6 @@
 {
   "awsRegionName" : "us-west-2",
   "firehoseStreamName" : "arbin-live-stream-dev",
-  "directoryToWatch" : "/Users/michael/workspace/forgenano/data-stream/test-data-directory"
+  "directoryToWatch" : "/Users/michael/workspace/forgenano/data-stream/test-data-directory",
+  "logFile" : "./data-streamer.log"
 }

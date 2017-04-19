@@ -41,6 +41,7 @@ launch4j {
     //copyConfigurable = project.tasks.shadowJar.outputs.files
     //jar = "lib/${project.tasks.shadowJar.archiveName}"
     icon = "${project.projectDir}/src/main/resources/icons/48x48.ico"
+    stayAlive = true
 }
 
 jar {

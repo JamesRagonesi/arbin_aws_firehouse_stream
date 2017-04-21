@@ -45,6 +45,16 @@ public class Configuration {
         }
     }
 
+    public byte[] getModelAsJsonBytes() {
+        try {
+            return new Gson().toJson(this.model, ConfigModel.class).getBytes(ConfigModel.CONFIG_ENCODING);
+        }
+        catch(Exception e) {
+            log.error("Failed to conver the configuration model to json bytes: ", e);
+            return null;
+        }
+    }
+
     public String getAwsRegionName() {
         return this.model.awsRegionName;
     }

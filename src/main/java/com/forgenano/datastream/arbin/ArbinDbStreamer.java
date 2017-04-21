@@ -2,6 +2,7 @@ package com.forgenano.datastream.arbin;
 
 import com.amazonaws.services.kinesis.model.InvalidArgumentException;
 import com.forgenano.datastream.model.ArbinEvent;
+import com.forgenano.datastream.status.StatusMaintainer;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
 import org.slf4j.Logger;
@@ -63,7 +64,7 @@ public class ArbinDbStreamer {
             throw new InvalidArgumentException("Arbin DB connection failed.");
         }
 
-        return new ArbinDbStreamer(dbConnection, 1000);
+        return new ArbinDbStreamer(arbinDbPath, dbConnection, 1000);
     }
 
     private static final String CHANNEL_TEST_ENTRY_QUERY =
@@ -78,6 +79,7 @@ public class ArbinDbStreamer {
     private static final String CHANNEL_TEST_COUNT_QUERY =
             "SELECT count(c.Data_Point) FROM Channel_Normal_Table as c where c.Data_point > ?;";
 
+    private Path arbinDbPath;
     private ExecutorService eventNotifierService;
     private ExecutorService eventMonitorService;
     private Connection dbConnection;
@@ -114,6 +116,7 @@ public class ArbinDbStreamer {
 
                 if (numberOfRecordsToConsume > 0){
                     lastDataPoint = consumeAvailableArbinData(numberOfRecordsToConsume);
+                    StatusMaintainer.getSingleton().updateRunningStatusForArbinDb(this.arbinDbPath, lastDataPoint);
                 }
                 else {
                     this.dataFileLock.lock();
@@ -130,7 +133,8 @@ public class ArbinDbStreamer {
         }
     };
 
-    private ArbinDbStreamer(Connection dbConnection, int resultPageSize)  {
+    private ArbinDbStreamer(Path arbinDbPath, Connection dbConnection, int resultPageSize)  {
+        this.arbinDbPath = arbinDbPath;
         this.dbConnection = dbConnection;
         this.eventConsumers = Lists.newArrayList();
         this.eventMonitorService = Executors.newSingleThreadExecutor();
@@ -174,7 +178,9 @@ public class ArbinDbStreamer {
     }
 
     public void blockAndStreamFinishedArbinDatabase() {
-        consumeAvailableArbinData(getNumberOfDataEventsAvailable(0));
+        StatusMaintainer.getSingleton().startedConsumingArbinDb(this.arbinDbPath);
+        long lastOffset = consumeAvailableArbinData(getNumberOfDataEventsAvailable(0));
+        StatusMaintainer.getSingleton().finishedConsumingArbinDb(this.arbinDbPath, lastOffset);
     }
 
     public void dataFileWasModified() {
@@ -244,6 +250,8 @@ public class ArbinDbStreamer {
                     this.newEventQueue.put(arbinEvent);
                     offset++;
                 }
+
+                StatusMaintainer.getSingleton().updateRunningStatusForArbinDb(this.arbinDbPath, offset);
             }
             catch(Exception e) {
                 log.error("Failed to execute channel test entry query with offset: " + offset + " - limit:" +

@@ -5,6 +5,8 @@
 test-data-directory/
 build/
 *.log
+*.status
+config.json
 
 # Mobile Tools for Java (J2ME)
 .mtj.tmp/

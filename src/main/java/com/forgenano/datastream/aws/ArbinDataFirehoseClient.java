@@ -1,6 +1,7 @@
 package com.forgenano.datastream.aws;
 
 import com.amazonaws.auth.AWSCredentialsProvider;
+import com.amazonaws.auth.AWSCredentialsProviderChain;
 import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.kinesisfirehose.AmazonKinesisFirehoseAsync;
@@ -29,7 +30,7 @@ public class ArbinDataFirehoseClient {
 
     public static ArbinDataFirehoseClient BuildKinesisFirehoseClient(String regionName, String streamName) {
         try {
-            AWSCredentialsProvider creds = new DefaultAWSCredentialsProviderChain();
+            AWSCredentialsProviderChain creds = new DefaultAWSCredentialsProviderChain();
 
             Regions region = Regions.fromName(regionName);
 

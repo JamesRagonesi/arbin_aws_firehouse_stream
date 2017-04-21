@@ -8,6 +8,7 @@ import com.forgenano.datastream.filter.StreamableFileFilter;
 import com.forgenano.datastream.listeners.DataDirectoryEventListener;
 import com.forgenano.datastream.model.StreamDataFileRunnable;
 import com.forgenano.datastream.status.StatusMaintainer;
+import com.forgenano.datastream.util.SingleApplicationInstanceUtil;
 import com.forgenano.datastream.watcher.DataDirectoryWatcher;
 import com.google.common.collect.Maps;
 import org.apache.log4j.FileAppender;
@@ -92,6 +93,15 @@ public class DataStreamer implements DataDirectoryEventListener {
     }
 
     public static void main(String[] args) {
+        try {
+            SingleApplicationInstanceUtil.StartMultipleApplicationBlock();
+        }
+        catch(Exception e) {
+            log.error(e.getMessage());
+            System.out.println(e.getMessage());
+            System.exit(1);
+        }
+
         System.out.println("DataStreamer Starting...");
 
         OptionSet runOptions = parseRunArgs(args);

@@ -11,6 +11,7 @@ import com.forgenano.datastream.status.StatusMaintainer;
 import com.forgenano.datastream.util.SingleApplicationInstanceUtil;
 import com.forgenano.datastream.watcher.DataDirectoryWatcher;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Queues;
 import org.apache.log4j.FileAppender;
 import org.apache.log4j.PatternLayout;
 import org.slf4j.Logger;
@@ -21,6 +22,7 @@ import joptsimple.OptionSet;
 import java.io.InputStream;
 import java.nio.file.*;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -31,17 +33,21 @@ public class DataStreamer implements DataDirectoryEventListener {
 
     private static Logger log = LoggerFactory.getLogger(DataStreamer.class);
 
-    public static Configuration configuration;
+    private static final int NUM_TASK_WORKER_THREADS = 4;
 
+    public static Configuration configuration;
     public static DataStreamer instance;
 
     private ArbinDataFirehoseClient firehoseClient;
     private ArbinEventFirehoseConsumer firehoseArbinEventConsumer;
     private Map<Path, ArbinDbStreamer> dbStreamers;
-    private ExecutorService listenerTaskExecutor;
+    private ExecutorService taskExecutorService;
     private StatusMaintainer statusMaintainer;
+    private DataDirectoryWatcher dataDirectoryWatcher;
+    private ConcurrentLinkedQueue<Path> arbinFilesToConsume;
 
     private DataStreamer(Configuration configuration) {
+        this.arbinFilesToConsume = Queues.newConcurrentLinkedQueue();
         this.dbStreamers = Maps.newHashMap();
         this.statusMaintainer = StatusMaintainer.getSingleton();
         this.firehoseClient = ArbinDataFirehoseClient.BuildKinesisFirehoseClient(
@@ -49,36 +55,59 @@ public class DataStreamer implements DataDirectoryEventListener {
 
         this.firehoseArbinEventConsumer = new ArbinEventFirehoseConsumer(this.firehoseClient);
 
-        this.listenerTaskExecutor = Executors.newSingleThreadExecutor();
+        this.taskExecutorService = Executors.newFixedThreadPool(NUM_TASK_WORKER_THREADS);
+    }
 
+    public void shutdown() {
+        this.taskExecutorService.shutdown();
+        this.dataDirectoryWatcher.shutdown();
+        this.statusMaintainer.saveStatusFileBlocking();
+        this.statusMaintainer.shutdown();
+    }
+
+    public void startWatchingDirectoryAndConsumingDataFiles(Path directoryToWatchPath) {
+        log.info("Looking for new data files that haven't been consumed.");
+
+        try {
+            Files.newDirectoryStream(directoryToWatchPath, new StreamableFileFilter()).forEach((arbinDbFile) -> {
+                log.info("Scheduling data file for consumption and streaming: " +
+                        arbinDbFile.toAbsolutePath().toString());
+
+                this.taskExecutorService.submit(new StreamDataFileRunnable(this,
+                        arbinDbFile.toAbsolutePath(), false));
+            });
+        }
+        catch(Exception e) {
+            log.error("Failed to create a directory stream for: " +
+                    directoryToWatchPath.toAbsolutePath().toString(), e);
+        }
+
+        this.dataDirectoryWatcher = DataDirectoryWatcher.InitializeSingleton(directoryToWatchPath);
+
+        this.dataDirectoryWatcher.addDirectoryEventListener(DataStreamer.instance);
+
+        this.dataDirectoryWatcher.start();
+
+        this.dataDirectoryWatcher.waitForShutdown();
     }
 
     @Override
     public void handleDataFileEvent(Path dataFilePath, WatchEvent.Kind<Path> eventKind) {
+        if (!StreamableFileFilter.IsFileStreamable(dataFilePath)) {
+            log.warn("Ignoring file: " + dataFilePath.toAbsolutePath().toString());
+
+            return;
+        }
+
         if (eventKind == StandardWatchEventKinds.ENTRY_CREATE) {
+            log.info("Consuming available data from new arbin db: " + dataFilePath.toAbsolutePath().toString());
 
-            if (!StreamableFileFilter.IsFileStreamable(dataFilePath)) {
-                return;
-            }
-
-            if (!this.statusMaintainer.hasArbinDbBeenConsumed(dataFilePath)) {
-                log.info("New data file to stream: " + dataFilePath.toAbsolutePath().toString());
-
-                this.listenerTaskExecutor.submit(new StreamDataFileRunnable(this, dataFilePath));
-            }
-            else {
-                log.info("Arbin data file has already been consumed: " + dataFilePath.toAbsolutePath().toString());
-            }
+            this.taskExecutorService.submit(new StreamDataFileRunnable(this, dataFilePath, true));
         }
         else if (eventKind == StandardWatchEventKinds.ENTRY_MODIFY) {
-            log.info("Data file was modified: " + dataFilePath.toAbsolutePath().toString());
+            log.info("Consuming available data from modified file: " + dataFilePath.toAbsolutePath().toString());
 
-            if (this.dbStreamers.containsKey(dataFilePath.toAbsolutePath())) {
-                ArbinDbStreamer dbStreamer = this.dbStreamers.get(dataFilePath.toAbsolutePath());
-
-                log.info("Notifying arbin db streamer of data file modification.");
-                dbStreamer.dataFileWasModified();
-            }
+            this.taskExecutorService.submit(new StreamDataFileRunnable(this, dataFilePath, true));
         }
     }
 
@@ -89,7 +118,86 @@ public class DataStreamer implements DataDirectoryEventListener {
 
         dbStreamer.addConsumer(this.firehoseArbinEventConsumer);
 
-        dbStreamer.startLiveMonitoring();
+        try {
+            dbStreamer.startLiveMonitoring();
+        }
+        catch (Exception e) {
+            log.error("Caught an exception while starting live monitoring of: " +
+                    newDataFile.toAbsolutePath().toString(), e);
+
+            this.dbStreamers.remove(newDataFile.toAbsolutePath());
+        }
+    }
+
+    public void startStreamingNewDataFromExistingDataFile(Path existingDataFile) {
+        if (this.dbStreamers.containsKey(existingDataFile.toAbsolutePath())) {
+            ArbinDbStreamer dbStreamer = this.dbStreamers.get(existingDataFile.toAbsolutePath());
+
+            log.info("Notifying arbin db streamer of data file modification.");
+
+            dbStreamer.dataFileWasModified();
+        }
+        else {
+            log.info("Data file was modified, but there isn't an active db streamer for it, creating a new one.");
+
+            ArbinDbStreamer dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(existingDataFile);
+
+            this.dbStreamers.put(existingDataFile.toAbsolutePath(), dbStreamer);
+
+            dbStreamer.addConsumer(this.firehoseArbinEventConsumer);
+
+            try {
+                dbStreamer.startLiveMonitoring();
+            }
+            catch (Exception e) {
+                log.error("Caught an exception while starting live monitoring of: " +
+                        existingDataFile.toAbsolutePath().toString(), e);
+
+                this.dbStreamers.remove(existingDataFile.toAbsolutePath());
+            }
+        }
+    }
+
+    private void blockAndConsumeArbinFile(Path arbinFilePath, boolean dumpMetadataOnly) {
+        if (Files.exists(arbinFilePath) && Files.isReadable(arbinFilePath)) {
+            log.info("Reading all arbin data events from: " + arbinFilePath.toAbsolutePath().toString());
+        }
+        else {
+            log.error("The supplied file: " + arbinFilePath.toAbsolutePath().toString() +
+                    " doesn't exist or isn't readable.");
+            System.exit(1);
+        }
+
+
+        ArbinDbStreamer dbStreamer = null;
+        try {
+            dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(arbinFilePath);
+        }
+        catch(Exception e) {
+            log.error("Failed to create an arbin db streamer object: " + e.getMessage());
+            System.exit(1);
+        }
+
+        if (!dumpMetadataOnly) {
+            log.info("Consuming arbin data file: " + arbinFilePath.toAbsolutePath().toString());
+
+
+            dbStreamer.addConsumer(this.firehoseArbinEventConsumer);
+
+            try {
+                dbStreamer.blockAndStreamFinishedArbinDatabase();
+            }
+            catch(Exception e) {
+                log.error("Failed to block and stream arbin db file: ", e);
+            }
+        }
+        else {
+            log.info("Dumping arbin data file metadata for: " + arbinFilePath.toAbsolutePath().toString());
+
+            dbStreamer.dumpArbinDbDetails();
+        }
+
+        dbStreamer.shutdown();
     }
 
     public static void main(String[] args) {
@@ -117,20 +225,15 @@ public class DataStreamer implements DataDirectoryEventListener {
         if (runOptions.has("f") && runOptions.hasArgument("f") && !runOptions.has("d")) {
             Path dataFilePath = Paths.get((String) runOptions.valueOf("f"));
 
-            if (!instance.statusMaintainer.hasArbinDbBeenConsumed(dataFilePath)) {
-                log.info("Consuming arbin db: " + dataFilePath.toAbsolutePath().toString());
+            log.info("Consuming available data from arbin db: " + dataFilePath.toAbsolutePath().toString());
 
-                consumeArbinFile(dataFilePath, false);
-            }
-            else {
-                log.info("ArbinDb has already been consumed: " + dataFilePath.toAbsolutePath().toString());
-            }
+            instance.blockAndConsumeArbinFile(dataFilePath, false);
         }
         else if (runOptions.has("f") && runOptions.hasArgument("f") && runOptions.has("d")) {
             Path dataFilePath = Paths.get((String) runOptions.valueOf("f"));
 
             log.info("Dumping metadata for arbin db: " + dataFilePath.toAbsolutePath().toAbsolutePath());
-            consumeArbinFile(dataFilePath, true);
+            instance.blockAndConsumeArbinFile(dataFilePath, true);
         }
         else if (runOptions.has("w")) {
             Path watchPath = Paths.get(configuration.getDirectoryToWatch());
@@ -138,59 +241,19 @@ public class DataStreamer implements DataDirectoryEventListener {
             log.info("Watching directory and consuming new arbin files as well as new to this run: " +
                     watchPath.toAbsolutePath().toString());
 
-            DataDirectoryWatcher directoryWatcher = DataDirectoryWatcher.InitializeSingleton(watchPath);
 
-            directoryWatcher.addDirectoryEventListener(DataStreamer.instance);
-
-            directoryWatcher.start();
-
-            directoryWatcher.waitForShutdown();
+            instance.startWatchingDirectoryAndConsumingDataFiles(watchPath);
         }
 
         log.info("Shutting down services...");
 
-        instance.statusMaintainer.saveStatusFileBlocking();
-        instance.statusMaintainer.shutdown();
+        instance.shutdown();
+
 
         log.info("Finished Running Data Streamer.");
     }
 
-    private static void consumeArbinFile(Path arbinFilePath, boolean dumpMetadataOnly) {
-        if (Files.exists(arbinFilePath) && Files.isReadable(arbinFilePath)) {
-            log.info("Reading all arbin data events from: " + arbinFilePath.toAbsolutePath().toString());
-        }
-        else {
-            log.error("The supplied file: " + arbinFilePath.toAbsolutePath().toString() +
-                    " doesn't exist or isn't readable.");
-            System.exit(1);
-        }
 
-
-        ArbinDbStreamer dbStreamer = null;
-        try {
-            dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(arbinFilePath);
-        }
-        catch(Exception e) {
-            log.error("Failed to create an arbin db streamer object: " + e.getMessage());
-            System.exit(1);
-        }
-
-        if (!dumpMetadataOnly) {
-            log.info("Consuming arbin data file: " + arbinFilePath.toAbsolutePath().toString());
-
-
-
-            dbStreamer.addConsumer(DataStreamer.instance.firehoseArbinEventConsumer);
-            dbStreamer.blockAndStreamFinishedArbinDatabase();
-        }
-        else {
-            log.info("Dumping arbin data file metadata for: " + arbinFilePath.toAbsolutePath().toString());
-
-            dbStreamer.dumpArbinDbDetails();
-        }
-
-        dbStreamer.shutdown();
-    }
 
     private static OptionSet parseRunArgs(String[] args) {
         try {

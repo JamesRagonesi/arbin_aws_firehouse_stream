@@ -15,14 +15,21 @@ public class StreamDataFileRunnable implements Runnable {
 
     private Path newDataFileToStream;
     private DataStreamer dataStreamer;
+    private boolean newFile;
 
-    public StreamDataFileRunnable(DataStreamer dataStreamer, Path newDataFileToStream) {
+    public StreamDataFileRunnable(DataStreamer dataStreamer, Path newDataFileToStream, boolean newFile) {
         this.dataStreamer = dataStreamer;
         this.newDataFileToStream = newDataFileToStream;
+        this.newFile = newFile;
     }
 
     @Override
     public void run() {
-        this.dataStreamer.startStreamingDataFromNewDataFile(this.newDataFileToStream);
+        if (this.newFile) {
+            this.dataStreamer.startStreamingDataFromNewDataFile(this.newDataFileToStream);
+        }
+        else {
+            this.dataStreamer.startStreamingNewDataFromExistingDataFile(this.newDataFileToStream);
+        }
     }
 }

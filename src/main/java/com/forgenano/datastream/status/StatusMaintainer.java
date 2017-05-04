@@ -102,26 +102,31 @@ public class StatusMaintainer {
         this.statusWriteService.shutdown();
     }
 
-    public synchronized boolean hasArbinDbBeenConsumed(Path arbinDbPath) {
-        return this.statusModel.hasPathBeenConsumed(arbinDbPath);
-    }
-
     public synchronized void startedConsumingArbinDb(Path arbinDbPath) {
-        this.statusModel.addNewRunningStatus(arbinDbPath);
+        this.statusModel.addNewArbinFileStatus(arbinDbPath);
 
         notifyWriteServiceToWrite();
     }
 
-    public synchronized void updateRunningStatusForArbinDb(Path arbinDbPath, long lastConsumedOffset) {
-        this.statusModel.updateLastConsumedOffset(arbinDbPath, lastConsumedOffset);
+    public synchronized void updateLastConsumedChannelOffset(Path arbinDbPath, long lastConsumedChannelOffset) {
+        this.statusModel.updateLastConsumedChannelOffset(arbinDbPath, lastConsumedChannelOffset);
 
         notifyWriteServiceToWrite();
     }
 
-    public synchronized void finishedConsumingArbinDb(Path arbinDbPath, long lastConsumedOffset) {
-        this.statusModel.finishedConsuming(arbinDbPath, lastConsumedOffset);
+    public synchronized boolean hasStatusForArbinDb(Path arbinDbPath) {
+        return this.statusModel.hasStatusForArbinDbPath(arbinDbPath);
+    }
 
-        notifyWriteServiceToWrite();
+    public synchronized long getLastConsumedOffsetForArbinDb(Path arbinDbPath) {
+        try {
+            return this.statusModel.getLastConsumedChannelOffset(arbinDbPath);
+        }
+        catch(Exception e) {
+            log.warn("No last consumed offset was available for: " + arbinDbPath.toAbsolutePath().toString());
+
+            return 0;
+        }
     }
 
     private synchronized void notifyWriteServiceToWrite() {
@@ -135,7 +140,6 @@ public class StatusMaintainer {
             this.writeNotificationLock.unlock();
         }
     }
-
 
     private synchronized StatusModel getFromLocalFile() throws IllegalStateException {
         Path statusFilePath = Paths.get(StatusFileStr);

@@ -1,7 +1,7 @@
 package com.forgenano.datastream.arbin;
 
 import com.forgenano.datastream.aws.ArbinDataFirehoseClient;
-import com.forgenano.datastream.model.ArbinEvent;
+import com.forgenano.datastream.model.ArbinChannelEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,9 +19,9 @@ public class ArbinEventFirehoseConsumer implements ArbinDataConsumer {
     }
 
     @Override
-    public void consume(ArbinEvent arbinEvent) {
-        log.info("Consumed arbin data event: " + arbinEvent.toString());
+    public void consume(ArbinChannelEvent arbinChannelEvent) {
+        log.info("Consumed arbin data event: " + arbinChannelEvent.toString());
 
-        this.arbinDataFirehoseClient.writeArbinEvent(arbinEvent);
+        this.arbinDataFirehoseClient.writeArbinEvent(arbinChannelEvent);
     }
 }

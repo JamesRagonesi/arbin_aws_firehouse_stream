@@ -1,6 +1,5 @@
 package com.forgenano.datastream.model;
 
-import com.forgenano.datastream.status.StatusMaintainer;
 import com.google.common.collect.Maps;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,56 +18,52 @@ public class StatusModel {
 
     public class RunStatus {
 
-        public long lastConsumedOffset;
+        public long lastConsumedChannelOffset;
 
         public RunStatus() {
-            this.lastConsumedOffset = 0;
+            this.lastConsumedChannelOffset = 0;
         }
     }
 
-
-    private Map<String, RunStatus> runningStatuses;
-    private Map<String, RunStatus> finishedStatuses;
+    private Map<String, RunStatus> arbinDataFileStatuses;
 
     public StatusModel() {
-        this.runningStatuses = Maps.newHashMap();
-        this.finishedStatuses = Maps.newHashMap();
+        this.arbinDataFileStatuses = Maps.newHashMap();
     }
 
-    public synchronized void addNewRunningStatus(Path arbinDbPath) {
-        this.runningStatuses.put(pathToKey(arbinDbPath), new RunStatus());
-    }
-
-    public synchronized void updateLastConsumedOffset(Path arbinDbPath, long lastConsumedOffset) {
+    public synchronized void addNewArbinFileStatus(Path arbinDbPath) {
         String key = pathToKey(arbinDbPath);
 
-        if (this.runningStatuses.containsKey(key)) {
-            this.runningStatuses.get(key).lastConsumedOffset = lastConsumedOffset;
+        if (!this.arbinDataFileStatuses.containsKey(key)) {
+            this.arbinDataFileStatuses.put(key, new RunStatus());
         }
-        else if (this.finishedStatuses.containsKey(key)) {
-            this.finishedStatuses.get(key).lastConsumedOffset = lastConsumedOffset;
+    }
+
+    public synchronized void updateLastConsumedChannelOffset(Path arbinDbPath, long lastConsumedChannelOffset) {
+        String key = pathToKey(arbinDbPath);
+
+        if (this.arbinDataFileStatuses.containsKey(key)) {
+            this.arbinDataFileStatuses.get(key).lastConsumedChannelOffset = lastConsumedChannelOffset;
         }
         else {
             log.warn("Unknown arbinDbPath, can't update last consumed offset for: " + key);
         }
     }
 
-    public synchronized void finishedConsuming(Path arbinDbPath, long lastConsumedOffset) {
+    public synchronized long getLastConsumedChannelOffset(Path arbinDbPath) throws IllegalArgumentException {
         String key = pathToKey(arbinDbPath);
-        RunStatus runStatus = this.runningStatuses.remove(key);
 
-        if (runStatus != null) {
-            this.finishedStatuses.put(key, runStatus);
+        if (this.arbinDataFileStatuses.containsKey(key)) {
+            return this.arbinDataFileStatuses.get(key).lastConsumedChannelOffset;
         }
-        else {
-            log.error("Can't set the arbinDbPath to finished because its not in the run list: " + key);
-        }
+
+        throw new IllegalArgumentException("Supplied ArbinDbPath isn't being monitored for status changes yet.");
     }
 
-    public synchronized boolean hasPathBeenConsumed(Path arbinDbPath) {
+    public synchronized boolean hasStatusForArbinDbPath(Path arbinDbPath) {
         String key = pathToKey(arbinDbPath);
 
-        return this.runningStatuses.containsKey(key) || this.finishedStatuses.containsKey(key);
+        return this.arbinDataFileStatuses.containsKey(key);
     }
 
     private String pathToKey(Path arbinDbPath) {

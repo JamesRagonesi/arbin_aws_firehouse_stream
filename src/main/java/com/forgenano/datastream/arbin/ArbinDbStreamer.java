@@ -1,7 +1,7 @@
 package com.forgenano.datastream.arbin;
 
 import com.amazonaws.services.kinesis.model.InvalidArgumentException;
-import com.forgenano.datastream.model.ArbinEvent;
+import com.forgenano.datastream.model.ArbinChannelEvent;
 import com.forgenano.datastream.status.StatusMaintainer;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
@@ -11,7 +11,6 @@ import org.slf4j.LoggerFactory;
 import java.io.InvalidClassException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.sql.*;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -21,6 +20,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static com.forgenano.datastream.model.ArbinChannelEvent.*;
 
 /**
  * Created by michael on 4/7/17.
@@ -71,10 +72,16 @@ public class ArbinDbStreamer {
             "SELECT c.Test_ID, c.Data_Point, c.Test_Time, c.Step_Time, c.DateTime, c.Step_Index, c.Cycle_Index, " +
                     "c.Is_FC_Data, c.Current, c.Voltage, c.Charge_Capacity, c.Discharge_Capacity, c.Charge_Energy, " +
                     "c.Discharge_Energy, c.`dV/dt`, c.Internal_Resistance, c.AC_Impedance, c.ACI_Phase_Angle, " +
-                    "g.Test_Name, g.Channel_Index, g.DAQ_Index, g.Channel_Type, g.Creator, g.Schedule_File_Name " +
+                    "g.Test_Name, g.Channel_Index, g.DAQ_Index, g.Channel_Type, g.Creator, g.Schedule_File_Name, " +
+                    "g.Comments, s.Vmax_On_Cycle, s.Charge_Time, s.Discharge_Time " +
              "FROM Channel_Normal_Table as c " +
              "LEFT JOIN Global_Table as g on c.Test_ID = g.Test_ID " +
-             "ORDER BY c.Data_Point ASC, TEST_ID LIMIT ? OFFSET ?";
+             "LEFT JOIN Channel_Statistic_Table as s on c.Test_ID = s.Test_ID AND c.Data_Point = s.Data_Point " +
+             "ORDER BY c.Data_Point ASC, c.Test_ID LIMIT ? OFFSET ?";
+
+    private static final String VERIFY_COMPATIBLE_DATA_QUERY =
+            "SELECT g.Test_ID, g.Test_Name, g.Channel_Index, g.Comments " +
+            "FROM Global_Table as g;";
 
     private static final String CHANNEL_TEST_COUNT_QUERY =
             "SELECT count(c.Data_Point) FROM Channel_Normal_Table as c where c.Data_point > ?;";
@@ -85,9 +92,10 @@ public class ArbinDbStreamer {
     private Connection dbConnection;
     private AtomicBoolean shutdownSignal;
     private List<ArbinDataConsumer> eventConsumers;
-    private SynchronousQueue<ArbinEvent> newEventQueue;
+    private SynchronousQueue<ArbinChannelEvent> newEventQueue;
     private PreparedStatement channelTestEntryStatement;
     private PreparedStatement channelTestCountStatement;
+    private PreparedStatement dataCompatibilitySatement;
     private int resultPageSize;
     private ReentrantLock dataFileLock;
     private Condition dataFileModifiedCondition;
@@ -95,7 +103,7 @@ public class ArbinDbStreamer {
     private Runnable eventNotifierRunnable = () -> {
         while(!this.shutdownSignal.get()) {
             try {
-                ArbinEvent newEvent = this.newEventQueue.poll(3, TimeUnit.SECONDS);
+                ArbinChannelEvent newEvent = this.newEventQueue.poll(3, TimeUnit.SECONDS);
 
                 if (newEvent != null) {
                     this.notifyEventConsumers(newEvent);
@@ -110,13 +118,18 @@ public class ArbinDbStreamer {
     private Runnable eventMonitorRunnable = () -> {
         long lastDataPoint = 0;
 
+        StatusMaintainer.getSingleton().startedConsumingArbinDb(this.arbinDbPath);
+        if (StatusMaintainer.getSingleton().hasStatusForArbinDb(this.arbinDbPath)) {
+            lastDataPoint = StatusMaintainer.getSingleton().getLastConsumedOffsetForArbinDb(this.arbinDbPath);
+        }
+
         while(!this.shutdownSignal.get()) {
             try {
                 long numberOfRecordsToConsume = getNumberOfDataEventsAvailable(lastDataPoint);
 
                 if (numberOfRecordsToConsume > 0){
                     lastDataPoint = consumeAvailableArbinData(numberOfRecordsToConsume);
-                    StatusMaintainer.getSingleton().updateRunningStatusForArbinDb(this.arbinDbPath, lastDataPoint);
+                    StatusMaintainer.getSingleton().updateLastConsumedChannelOffset(this.arbinDbPath, lastDataPoint);
                 }
                 else {
                     this.dataFileLock.lock();
@@ -153,6 +166,7 @@ public class ArbinDbStreamer {
             this.channelTestEntryStatement.setMaxRows(this.resultPageSize);
 
             this.channelTestCountStatement = this.dbConnection.prepareStatement(CHANNEL_TEST_COUNT_QUERY);
+            this.dataCompatibilitySatement = this.dbConnection.prepareStatement(VERIFY_COMPATIBLE_DATA_QUERY);
         }
         catch(Exception e) {
             log.error("Failed to build the channel test entry query because: " + e.getMessage());
@@ -174,13 +188,26 @@ public class ArbinDbStreamer {
     }
 
     public void startLiveMonitoring() {
+        if (!this.isArbinDbFileCompatible()) {
+            log.warn("Ignoring incompatible arbin db file: " + this.arbinDbPath.toAbsolutePath().toString());
+            this.shutdown();
+
+            throw new IllegalStateException("Not compatible arbin file.");
+        }
+
         this.eventMonitorService.submit(this.eventMonitorRunnable);
     }
 
     public void blockAndStreamFinishedArbinDatabase() {
+        if (!this.isArbinDbFileCompatible()) {
+           log.warn("Ignoring incompatible arbin file: " + this.arbinDbPath.toAbsolutePath().toString());
+
+           throw new IllegalStateException("Not compatible arbin file");
+        }
+
         StatusMaintainer.getSingleton().startedConsumingArbinDb(this.arbinDbPath);
         long lastOffset = consumeAvailableArbinData(getNumberOfDataEventsAvailable(0));
-        StatusMaintainer.getSingleton().finishedConsumingArbinDb(this.arbinDbPath, lastOffset);
+        StatusMaintainer.getSingleton().updateLastConsumedChannelOffset(this.arbinDbPath, lastOffset);
     }
 
     public void dataFileWasModified() {
@@ -220,7 +247,7 @@ public class ArbinDbStreamer {
         return numberOfRecordsToConsume;
     }
 
-    private synchronized void notifyEventConsumers(ArbinEvent event) {
+    private synchronized void notifyEventConsumers(ArbinChannelEvent event) {
         this.eventConsumers.parallelStream().forEach(consumer -> {
             consumer.consume(event);
         });
@@ -245,13 +272,13 @@ public class ArbinDbStreamer {
                 ResultSet channelQueryResultSet = this.channelTestEntryStatement.executeQuery();
 
                 while(channelQueryResultSet.next()) {
-                    ArbinEvent arbinEvent = convertArbinFromChannelTestEntryResultSet(channelQueryResultSet);
+                    ArbinChannelEvent arbinChannelEvent = convertArbinFromChannelTestEntryResultSet(channelQueryResultSet);
 
-                    this.newEventQueue.put(arbinEvent);
+                    this.newEventQueue.put(arbinChannelEvent);
                     offset++;
                 }
 
-                StatusMaintainer.getSingleton().updateRunningStatusForArbinDb(this.arbinDbPath, offset);
+                StatusMaintainer.getSingleton().updateLastConsumedChannelOffset(this.arbinDbPath, offset);
             }
             catch(Exception e) {
                 log.error("Failed to execute channel test entry query with offset: " + offset + " - limit:" +
@@ -263,8 +290,45 @@ public class ArbinDbStreamer {
         return offset;
     }
 
-    private ArbinEvent convertArbinFromChannelTestEntryResultSet(ResultSet resultSetRow) {
-        ArbinEvent newArbinEvent = null;
+    public boolean isArbinDbFileCompatible() throws IllegalStateException {
+        try {
+            ResultSet compatibleDataResults = this.dataCompatibilitySatement.executeQuery();
+
+            boolean compatible = false;
+
+            while(compatibleDataResults.next()) {
+                String test_name = compatibleDataResults.getString("Test_Name");
+                String comments = compatibleDataResults.getString("Comments");
+
+                try {
+                    ArbinTestMetadata metadata =
+                            ArbinChannelEvent.ArbinTestMetadata.FromCommentsString(comments, test_name);
+
+                    compatible = metadata != null;
+
+                    if (!compatible) {
+                        log.warn("One of the arbin channel tests doesn't have the proper metadata, marking the entire file as not compatible.");
+                        break;
+                    }
+                }
+                catch(Exception e) {
+                    log.warn("Couldn't get the arbin test metadata, which means this db isn't compatible.");
+                    compatible = false;
+                    break;
+                }
+            }
+
+            return compatible;
+        }
+        catch(Exception e) {
+            log.error("Failed to query the arbin db file for compatiblity because: ", e);
+
+            throw new IllegalStateException("Couldn't query arbin db for compatibility: ", e);
+        }
+    }
+
+    private ArbinChannelEvent convertArbinFromChannelTestEntryResultSet(ResultSet resultSetRow) {
+        ArbinChannelEvent newArbinChannelEvent = null;
         try {
             long testId = resultSetRow.getLong("Test_ID");
             String testName = resultSetRow.getString("Test_Name");
@@ -288,17 +352,29 @@ public class ArbinDbStreamer {
             double acImpedance = resultSetRow.getDouble("AC_Impedance");
             double aciPhaseAngle = resultSetRow.getDouble("ACI_Phase_Angle");
             String scheduleFileName = resultSetRow.getString("Schedule_File_Name");
+            String comments = resultSetRow.getString("Comments");
 
-            newArbinEvent = new ArbinEvent(
+            // s.Vmax_On_Cycle, s.Charge_Time, s.Discharge_Time
+            double vMaxOnCycleStat = resultSetRow.getDouble("Vmax_On_Cycle");
+            double chargeTimeCycleStat = resultSetRow.getDouble("Charge_Time");
+            double dischargeTimeCycleStat = resultSetRow.getDouble("Discharge_Time");
+
+            ArbinChannelEvent.ArbinCycleStatistics cycleStats = null;
+            if (!resultSetRow.wasNull()) {
+                cycleStats = new ArbinChannelEvent.ArbinCycleStatistics(vMaxOnCycleStat, chargeTimeCycleStat,
+                        dischargeTimeCycleStat);
+            }
+
+            newArbinChannelEvent = new ArbinChannelEvent(
                     testId, testName, dataPoint, channelIndex, daqIndex, channelType, creator, testTimeRaw, stepTimeRaw,
                     dateTimeRaw, stepIndex, cycleIndex, isFCData, current, voltage, chargeCapacity, dischargeCapacity,
-                    dV_dt, internalResistence, acImpedance, aciPhaseAngle, scheduleFileName);
+                    dV_dt, internalResistence, acImpedance, aciPhaseAngle, scheduleFileName, comments, cycleStats);
         }
         catch(Exception e) {
             log.warn("Failed to convert arbin channel data because: ", e);
         }
 
-        return newArbinEvent;
+        return newArbinChannelEvent;
     }
 
     public void dumpArbinDbDetails() {

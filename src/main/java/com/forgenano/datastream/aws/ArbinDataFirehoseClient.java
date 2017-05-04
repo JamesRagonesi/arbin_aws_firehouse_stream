@@ -1,6 +1,5 @@
 package com.forgenano.datastream.aws;
 
-import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.auth.AWSCredentialsProviderChain;
 import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.regions.Regions;
@@ -9,7 +8,7 @@ import com.amazonaws.services.kinesisfirehose.AmazonKinesisFirehoseAsyncClientBu
 import com.amazonaws.services.kinesisfirehose.model.PutRecordRequest;
 import com.amazonaws.services.kinesisfirehose.model.PutRecordResult;
 import com.amazonaws.services.kinesisfirehose.model.Record;
-import com.forgenano.datastream.model.ArbinEvent;
+import com.forgenano.datastream.model.ArbinChannelEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,7 +57,7 @@ public class ArbinDataFirehoseClient {
         this.defaultStreamName = defaultStreamName;
     }
 
-    public void writeArbinEvent(ArbinEvent event) {
+    public void writeArbinEvent(ArbinChannelEvent event) {
         PutRecordRequest putRecordRequest = new PutRecordRequest();
         putRecordRequest.setDeliveryStreamName(this.defaultStreamName);
 

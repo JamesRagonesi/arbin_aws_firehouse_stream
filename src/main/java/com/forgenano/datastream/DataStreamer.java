@@ -8,6 +8,7 @@ import com.forgenano.datastream.filter.StreamableFileFilter;
 import com.forgenano.datastream.listeners.DataDirectoryEventListener;
 import com.forgenano.datastream.model.StreamDataFileRunnable;
 import com.forgenano.datastream.status.StatusMaintainer;
+import com.forgenano.datastream.util.NamedThreadFactory;
 import com.forgenano.datastream.util.SingleApplicationInstanceUtil;
 import com.forgenano.datastream.watcher.DataDirectoryWatcher;
 import com.google.common.collect.Maps;
@@ -55,7 +56,8 @@ public class DataStreamer implements DataDirectoryEventListener {
 
         this.firehoseArbinEventConsumer = new ArbinEventFirehoseConsumer(this.firehoseClient);
 
-        this.taskExecutorService = Executors.newFixedThreadPool(NUM_TASK_WORKER_THREADS);
+        this.taskExecutorService = Executors.newFixedThreadPool(NUM_TASK_WORKER_THREADS,
+                NamedThreadFactory.NewNamedDaemonThreadFactory("DataStreamerTaskWorker"));
     }
 
     public void shutdown() {
@@ -91,6 +93,13 @@ public class DataStreamer implements DataDirectoryEventListener {
         this.dataDirectoryWatcher.waitForShutdown();
     }
 
+    public void handleArbinDbStreamerShuttingDown(ArbinDbStreamer dbStreamer, Path arbinDbPath) {
+        if (this.dbStreamers.containsKey(arbinDbPath.toAbsolutePath()))
+            this.dbStreamers.remove(arbinDbPath.toAbsolutePath(), dbStreamer);
+
+        System.gc();
+    }
+
     @Override
     public void handleDataFileEvent(Path dataFilePath, WatchEvent.Kind<Path> eventKind) {
         if (!StreamableFileFilter.IsFileStreamable(dataFilePath)) {
@@ -112,7 +121,7 @@ public class DataStreamer implements DataDirectoryEventListener {
     }
 
     public void startStreamingDataFromNewDataFile(Path newDataFile) {
-        ArbinDbStreamer dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(newDataFile);
+        ArbinDbStreamer dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(newDataFile, this);
 
         this.dbStreamers.put(newDataFile.toAbsolutePath(), dbStreamer);
 
@@ -140,7 +149,7 @@ public class DataStreamer implements DataDirectoryEventListener {
         else {
             log.info("Data file was modified, but there isn't an active db streamer for it, creating a new one.");
 
-            ArbinDbStreamer dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(existingDataFile);
+            ArbinDbStreamer dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(existingDataFile, this);
 
             this.dbStreamers.put(existingDataFile.toAbsolutePath(), dbStreamer);
 
@@ -151,7 +160,7 @@ public class DataStreamer implements DataDirectoryEventListener {
             }
             catch (Exception e) {
                 log.error("Caught an exception while starting live monitoring of: " +
-                        existingDataFile.toAbsolutePath().toString(), e);
+                        existingDataFile.toAbsolutePath().toString() + " - " + e.getMessage());
 
                 this.dbStreamers.remove(existingDataFile.toAbsolutePath());
             }
@@ -171,7 +180,7 @@ public class DataStreamer implements DataDirectoryEventListener {
 
         ArbinDbStreamer dbStreamer = null;
         try {
-            dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(arbinFilePath);
+            dbStreamer = ArbinDbStreamer.CreateArbinDbStreamer(arbinFilePath, this);
         }
         catch(Exception e) {
             log.error("Failed to create an arbin db streamer object: " + e.getMessage());
@@ -347,7 +356,7 @@ public class DataStreamer implements DataDirectoryEventListener {
         try {
             Path logFilePath = Paths.get(DataStreamer.configuration.getLogFileString());
             FileAppender fileAppender = new FileAppender(
-                    new PatternLayout("%d %-5p [%c{1}] %m%n"), logFilePath.toAbsolutePath().toString(), true);
+                    new PatternLayout("%d [%t] %-5p [%c{1}] %m%n"), logFilePath.toAbsolutePath().toString(), true);
 
             fileAppender.setThreshold(org.apache.log4j.Level.ALL);
             org.apache.log4j.Logger.getRootLogger().addAppender(fileAppender);

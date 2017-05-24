@@ -1,6 +1,7 @@
 package com.forgenano.datastream.model;
 
-import com.google.gson.Gson;
+import com.google.common.collect.*;
+import com.google.gson.*;
 import joptsimple.internal.Strings;
 import org.joda.time.DateTimeZone;
 import org.joda.time.LocalDateTime;
@@ -9,6 +10,8 @@ import org.joda.time.format.DateTimeFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.Type;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,67 +36,150 @@ public class ArbinChannelEvent {
 
         private static final Logger log = LoggerFactory.getLogger(ArbinTestMetadata.class);
 
-        private static Pattern COMMENTS_WEIGHT_REGEX = Pattern.compile(".*[wW]:\\s*(\\d+(?:\\.?\\d+)?)");
-        private static Pattern COMMENTS_RAW_MAT_ID_REGEX = Pattern.compile(".*[mM]_[iI][dD]:\\s*([a-zA-Z_0-9-.]+)");
-        private static Pattern COMMENTS_BATCH_ID_REGEX = Pattern.compile(".*[bB]_[iI][dD]:\\s*([a-zA-Z_0-9-.]+)");
+        public static class Serializer implements JsonSerializer<ArbinTestMetadata> {
 
-        public static ArbinTestMetadata FromCommentsString(String comments, String test_name) {
-            if (Strings.isNullOrEmpty(comments))
-                return null;
+            @Override
+            public JsonElement serialize(ArbinTestMetadata src, Type typeOfSrc, JsonSerializationContext context) {
+                JsonObject metadataObject = new JsonObject();
 
-            String weightStr = null;
-            double weightValue = -1;
-            String rawMaterialId = null;
-            String batchId = null;
-
-            try {
-                Matcher weightMatcher = COMMENTS_WEIGHT_REGEX.matcher(comments);
-                if (weightMatcher.find()) {
-                    weightStr = weightMatcher.group(1);
-
-                    if (!Strings.isNullOrEmpty(weightStr)) {
-                        try {
-                            weightValue = Double.parseDouble(weightStr);
-                        }
-                        catch(Exception e) {
-                            log.error("Failed to convert arbin test metadata, weight value: " + weightStr +
-                                    " to a double in test: " + test_name);
-                        }
-                    }
-                }
-                else {
-                    log.warn("Missing weight in comments for test_name: " + test_name);
-                    return null;
+                if (src.averageAnodeWeight != -1.0) {
+                    metadataObject.add("averageAnodeWeight", context.serialize(src.averageAnodeWeight));
                 }
 
-                Matcher rawMatIdMatcher = COMMENTS_RAW_MAT_ID_REGEX.matcher(comments);
-                if (rawMatIdMatcher.find()) {
-                    rawMaterialId = rawMatIdMatcher.group(1);
+                if (src.averageCathodeWeight != -1.0) {
+                    metadataObject.add("averageCathodeWeight", context.serialize(src.averageCathodeWeight));
                 }
 
-                Matcher batchIdMatcher = COMMENTS_BATCH_ID_REGEX.matcher(comments);
-                if (batchIdMatcher.find()) {
-                    batchId = batchIdMatcher.group(1);
+                if (!src.anodeRawMaterialIds.isEmpty()) {
+                    metadataObject.add("anodeRawMaterialIds", context.serialize(src.anodeRawMaterialIds));
                 }
 
-                return new ArbinTestMetadata(weightValue, rawMaterialId, batchId);
-            }
-            catch(Exception e) {
-                log.error("Failed to pull the Arbin Test Metadata (test: " + test_name + ") from the comments string: ("
-                        + comments + ") because: ", e);
+                if (!src.anodeBatchIds.isEmpty()) {
+                    metadataObject.add("anodeBatchIds", context.serialize(src.anodeBatchIds));
+                }
 
-                return null;
+                if (!src.cathodeRawMaterialIds.isEmpty()) {
+                    metadataObject.add("cathodeRawMaterialIds", context.serialize(src.cathodeRawMaterialIds));
+                }
+
+                if (!src.cathodeBatchIds.isEmpty()) {
+                    metadataObject.add("cathodeBatchIds", context.serialize(src.cathodeBatchIds));
+                }
+
+                return metadataObject;
             }
         }
 
-        private double materialWeight;
-        private String rawMaterialId;
-        private String batchId;
+        // <C|A>_<M|B>_ID=<id>:<weight>,...,<id>:<weight>
+        private static Pattern COMMENTS_C_M_ID_WEIGHT_REGEX = Pattern.compile("C_M_ID=([a-zA-Z_0-9-.:,]+)");
+        private static Pattern COMMENTS_C_B_ID_WEIGHT_REGEX = Pattern.compile("C_B_ID=([a-zA-Z_0-9-.:,]+)");
+        private static Pattern COMMENTS_A_M_ID_WEIGHT_REGEX = Pattern.compile("A_M_ID=([a-zA-Z_0-9-.:,]+)");
+        private static Pattern COMMENTS_A_B_ID_WEIGHT_REGEX = Pattern.compile("A_B_ID=([a-zA-Z_0-9-.:,]+)");
 
-        private ArbinTestMetadata(double materialWeight, String rawMaterialId, String batchId) {
-            this.materialWeight = materialWeight;
-            this.rawMaterialId = rawMaterialId;
-            this.batchId = batchId;
+        private static Multimap<String, Double> getIdsAndWeightsForRegex(Pattern regex, String commentsField,
+                                                                         String testName) {
+
+            Multimap<String, Double> parsedIdsToWeights = HashMultimap.create();
+
+            try {
+                Matcher idsAndWeightsMatcher = regex.matcher(commentsField);
+
+                if (idsAndWeightsMatcher.find()) {
+                    String weightsAndIdsString = idsAndWeightsMatcher.group(1);
+
+                    if (!Strings.isNullOrEmpty(weightsAndIdsString)) {
+                        String[] weightsAndIdPairs = weightsAndIdsString.split(",");
+
+                        for (String weightsAndIdPair : weightsAndIdPairs) {
+                            String[] weightAndIdPair = weightsAndIdPair.split(":");
+                            String id = weightAndIdPair[0];
+                            String weightStr = weightAndIdPair[1];
+                            double weightValue = -1;
+
+                            try {
+                                weightValue = Double.parseDouble(weightStr);
+                                parsedIdsToWeights.put(id, weightValue);
+                            }
+                            catch (Exception e) {
+                                log.error("Comments for test: " + testName + " failed to convert: (" + weightStr +
+                                        ") to a double value because: " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+            catch(Exception e) {
+                log.error("Failed to run the ids and weights regex ( " + regex.pattern() + " ) for the test: " +
+                        testName + " on the comments field: " + commentsField + " because: " + e.getMessage());
+            }
+
+            return parsedIdsToWeights;
+        }
+
+        public static ArbinTestMetadata FromCommentsString(String comments, String testName) {
+            if (Strings.isNullOrEmpty(comments))
+                return null;
+
+            Multimap<String, Double> cathodeMaterialIdWeights =
+                    getIdsAndWeightsForRegex(COMMENTS_C_M_ID_WEIGHT_REGEX, comments, testName);
+
+            Multimap<String, Double> cathodeBatchIdWeights =
+                    getIdsAndWeightsForRegex(COMMENTS_C_B_ID_WEIGHT_REGEX, comments, testName);
+
+            Multimap<String, Double> anodeMaterialIdWeights =
+                    getIdsAndWeightsForRegex(COMMENTS_A_M_ID_WEIGHT_REGEX, comments, testName);
+
+            Multimap<String, Double> anodeBatchIdWeights =
+                    getIdsAndWeightsForRegex(COMMENTS_A_B_ID_WEIGHT_REGEX, comments, testName);
+
+            if (cathodeMaterialIdWeights.isEmpty() && cathodeBatchIdWeights.isEmpty() &&
+                anodeMaterialIdWeights.isEmpty() && anodeMaterialIdWeights.isEmpty()) {
+                log.warn("The test: " + testName + " has a comments field which was not parsed correctly: " + comments);
+
+                return null;
+            }
+
+            double averageCathodeWeight = -1.0;
+            double averageAnodeWeight = -1.0;
+
+            Collection<Double> allCathodeWeights = Lists.newArrayList(cathodeBatchIdWeights.values());
+            allCathodeWeights.addAll(cathodeMaterialIdWeights.values());
+
+            OptionalDouble optionalCathodeAverage =
+                    allCathodeWeights.stream().mapToDouble(Double::doubleValue).average();
+
+            if (optionalCathodeAverage.isPresent())
+                averageCathodeWeight = optionalCathodeAverage.getAsDouble();
+
+            Collection<Double> allAnodeWeights = Lists.newArrayList(anodeBatchIdWeights.values());
+            allAnodeWeights.addAll(anodeMaterialIdWeights.values());
+
+            OptionalDouble optionalAnodeAverage =
+                    allAnodeWeights.stream().mapToDouble(Double::doubleValue).average();
+
+            if (optionalAnodeAverage.isPresent())
+                averageAnodeWeight = optionalAnodeAverage.getAsDouble();
+
+            return new ArbinTestMetadata(averageCathodeWeight, averageAnodeWeight, cathodeMaterialIdWeights.keySet(),
+                    cathodeBatchIdWeights.keySet(), anodeMaterialIdWeights.keySet(), anodeBatchIdWeights.keySet());
+        }
+
+        double averageAnodeWeight;
+        double averageCathodeWeight;
+        Collection<String> cathodeRawMaterialIds;
+        Collection<String> cathodeBatchIds;
+        Collection<String> anodeRawMaterialIds;
+        Collection<String> anodeBatchIds;
+
+        private ArbinTestMetadata(double averageCathodeWeight, double averageAnodeWeight,
+                                  Collection<String> cathodeRawMaterialIds, Collection<String> cathodeBatchIds,
+                                  Collection<String> anodeRawMaterialIds, Collection<String> anodeBatchIds) {
+            this.averageAnodeWeight = averageAnodeWeight;
+            this.averageCathodeWeight = averageCathodeWeight;
+            this.cathodeRawMaterialIds = cathodeRawMaterialIds;
+            this.cathodeBatchIds = cathodeBatchIds;
+            this.anodeRawMaterialIds = anodeRawMaterialIds;
+            this.anodeBatchIds = anodeBatchIds;
         }
     }
 
@@ -190,7 +276,7 @@ public class ArbinChannelEvent {
     }
 
     public String toString() {
-        StringBuffer out = new StringBuffer();
+        StringBuilder out = new StringBuilder();
 
         out.append("Arbin Data Point - TestName: ");
         out.append(this.testName);
@@ -207,8 +293,14 @@ public class ArbinChannelEvent {
     }
 
     public String toJsonString() {
-        if (jsonConverter == null)
-            jsonConverter = new Gson();
+        if (jsonConverter == null) {
+
+            GsonBuilder gsonBuilder = new GsonBuilder();
+
+            gsonBuilder.registerTypeAdapter(ArbinTestMetadata.class, new ArbinTestMetadata.Serializer());
+
+            jsonConverter = gsonBuilder.create();
+        }
 
         return jsonConverter.toJson(this);
     }

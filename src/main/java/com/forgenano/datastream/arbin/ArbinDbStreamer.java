@@ -1,8 +1,10 @@
 package com.forgenano.datastream.arbin;
 
 import com.amazonaws.services.kinesis.model.InvalidArgumentException;
+import com.forgenano.datastream.DataStreamer;
 import com.forgenano.datastream.model.ArbinChannelEvent;
 import com.forgenano.datastream.status.StatusMaintainer;
+import com.forgenano.datastream.util.NamedThreadFactory;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
 import org.slf4j.Logger;
@@ -18,6 +20,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -30,6 +33,10 @@ public class ArbinDbStreamer {
 
     private static final Logger log = LoggerFactory.getLogger(ArbinDbStreamer.class);
 
+    private static final int MAX_NEW_DATA_WAIT_ITERATIONS = 12; //  should be 2 minutes worth of waiting before exiting.
+    private static final long WAIT_FOR_NEW_DATA_TIME = 10;
+    private static final TimeUnit WAIT_FOR_NEW_DATA_TIMEUNIT = TimeUnit.SECONDS;
+
     /**
      * Attempts to create a connection to the specified arbin database file.
      *
@@ -37,7 +44,7 @@ public class ArbinDbStreamer {
      * @return fully setup ArbinDbStreamer.
      * @throws InvalidClassException
      */
-    public static ArbinDbStreamer CreateArbinDbStreamer(Path arbinDbPath) {
+    public static ArbinDbStreamer CreateArbinDbStreamer(Path arbinDbPath, DataStreamer dataStreamer) {
 
         if (!Files.exists(arbinDbPath) || !Files.isReadable(arbinDbPath)) {
             log.error("The file: " + arbinDbPath.toAbsolutePath().toString() + " doesn't exist or isn't readable.");
@@ -65,7 +72,7 @@ public class ArbinDbStreamer {
             throw new InvalidArgumentException("Arbin DB connection failed.");
         }
 
-        return new ArbinDbStreamer(arbinDbPath, dbConnection, 1000);
+        return new ArbinDbStreamer(arbinDbPath, dataStreamer, dbConnection, 1000);
     }
 
     private static final String CHANNEL_TEST_ENTRY_QUERY =
@@ -87,6 +94,7 @@ public class ArbinDbStreamer {
             "SELECT count(c.Data_Point) FROM Channel_Normal_Table as c where c.Data_point > ?;";
 
     private Path arbinDbPath;
+    private DataStreamer dataStreamer;
     private ExecutorService eventNotifierService;
     private ExecutorService eventMonitorService;
     private Connection dbConnection;
@@ -99,6 +107,7 @@ public class ArbinDbStreamer {
     private int resultPageSize;
     private ReentrantLock dataFileLock;
     private Condition dataFileModifiedCondition;
+    private AtomicInteger numberOfWaitCycles;
 
     private Runnable eventNotifierRunnable = () -> {
         while(!this.shutdownSignal.get()) {
@@ -123,40 +132,66 @@ public class ArbinDbStreamer {
             lastDataPoint = StatusMaintainer.getSingleton().getLastConsumedOffsetForArbinDb(this.arbinDbPath);
         }
 
-        while(!this.shutdownSignal.get()) {
+        while(!this.shutdownSignal.get() && numberOfWaitCycles.get() <= MAX_NEW_DATA_WAIT_ITERATIONS) {
             try {
                 long numberOfRecordsToConsume = getNumberOfDataEventsAvailable(lastDataPoint);
 
                 if (numberOfRecordsToConsume > 0){
+                    // reset wait for data iteration count
+                    this.numberOfWaitCycles.set(0);
+
                     lastDataPoint = consumeAvailableArbinData(numberOfRecordsToConsume);
                     StatusMaintainer.getSingleton().updateLastConsumedChannelOffset(this.arbinDbPath, lastDataPoint);
+
+                    log.info("Finished consuming all available content for: " + this.arbinDbPath.toAbsolutePath().toString());
                 }
                 else {
-                    this.dataFileLock.lock();
+                    try {
+                        this.numberOfWaitCycles.getAndIncrement();
 
-                    this.dataFileModifiedCondition.await(30, TimeUnit.SECONDS);
+                        this.dataFileLock.lock();
+                        log.info("Waiting " + WAIT_FOR_NEW_DATA_TIME + " " + WAIT_FOR_NEW_DATA_TIMEUNIT.name() +
+                                " for new arbin db content: " + this.arbinDbPath.toAbsolutePath().toString());
+                        this.dataFileModifiedCondition.await(WAIT_FOR_NEW_DATA_TIME, WAIT_FOR_NEW_DATA_TIMEUNIT);
+                    }
+                    finally {
+                        this.dataFileLock.unlock();
+                    }
                 }
             }
             catch(Exception e) {
                 log.error("An exception occurred while monitoring for new arbin events: ", e);
             }
-            finally {
-                this.dataFileLock.unlock();
-            }
         }
+        if (this.shutdownSignal.get()) {
+            log.info("Received external shutdown signal, stopping monitoring of: " +
+                    this.arbinDbPath.toAbsolutePath().toString());
+        }
+        else {
+            log.info("Shutting down monitoring after waiting 2 minutes for new data: " +
+                    arbinDbPath.toAbsolutePath().toString());
+
+            this.shutdown();
+            this.dataStreamer.handleArbinDbStreamerShuttingDown(this, this.arbinDbPath);
+        }
+
     };
 
-    private ArbinDbStreamer(Path arbinDbPath, Connection dbConnection, int resultPageSize)  {
+    private ArbinDbStreamer(Path arbinDbPath, DataStreamer dataStreamer, Connection dbConnection, int resultPageSize)  {
+        this.dataStreamer = dataStreamer;
         this.arbinDbPath = arbinDbPath;
         this.dbConnection = dbConnection;
         this.eventConsumers = Lists.newArrayList();
-        this.eventMonitorService = Executors.newSingleThreadExecutor();
-        this.eventNotifierService = Executors.newSingleThreadExecutor();
+        this.eventMonitorService = Executors.newSingleThreadExecutor(
+                NamedThreadFactory.NewNamedDaemonThreadFactory("ArbinDBEventMonitor"));
+        this.eventNotifierService = Executors.newSingleThreadExecutor(
+                NamedThreadFactory.NewNamedDaemonThreadFactory("ArbinDbEventNotifier"));
         this.newEventQueue = Queues.newSynchronousQueue();
         this.shutdownSignal = new AtomicBoolean(false);
         this.resultPageSize = resultPageSize;
         this.dataFileLock = new ReentrantLock();
         this.dataFileModifiedCondition = this.dataFileLock.newCondition();
+        this.numberOfWaitCycles = new AtomicInteger(0);
 
         this.eventNotifierService.submit(this.eventNotifierRunnable);
 
@@ -258,7 +293,7 @@ public class ArbinDbStreamer {
 
         log.info("Consuming " + numberOfRecordsToConsume + " of arbin channel data.");
 
-        while(offset <= numberOfRecordsToConsume) {
+        while(offset < numberOfRecordsToConsume) {
             try {
                 this.channelTestEntryStatement.setInt(1, this.resultPageSize);
                 this.channelTestEntryStatement.setLong(2, offset);
@@ -279,13 +314,18 @@ public class ArbinDbStreamer {
                 }
 
                 StatusMaintainer.getSingleton().updateLastConsumedChannelOffset(this.arbinDbPath, offset);
+
+                System.gc();
             }
             catch(Exception e) {
                 log.error("Failed to execute channel test entry query with offset: " + offset + " - limit:" +
                         this.resultPageSize + " because: ", e);
                 break;
             }
+
         }
+
+        log.info("Finished consuming " + numberOfRecordsToConsume + " records...");
 
         return offset;
     }

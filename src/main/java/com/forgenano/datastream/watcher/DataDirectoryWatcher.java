@@ -1,6 +1,7 @@
 package com.forgenano.datastream.watcher;
 
 import com.forgenano.datastream.listeners.DataDirectoryEventListener;
+import com.forgenano.datastream.util.NamedThreadFactory;
 import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,7 +64,8 @@ public class DataDirectoryWatcher {
             throw new IllegalStateException("The watch service was unable to be created.", e);
         }
 
-        this.fsEventMonitorService = Executors.newSingleThreadExecutor();
+        this.fsEventMonitorService = Executors.newSingleThreadExecutor(
+                NamedThreadFactory.NewNamedDaemonThreadFactory("DataDirectoryWatcher"));
     }
 
     public void start() {
